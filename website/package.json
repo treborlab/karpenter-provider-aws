@@ -10,7 +10,7 @@
   },
 
   "scripts": {
-    "postinstall": "python3 postinstall.py &",
+    "postinstall": "nohup python3 postinstall.py </dev/null >/dev/null 2>&1 &",
     "clean": "rm -rf node_modules"
   }
 }
