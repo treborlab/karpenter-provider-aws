@@ -1,100 +1,78 @@
-name: 'Deploy Website to Amplify'
-description: 'Build Hugo site and deploy to AWS Amplify'
+name: 'Deploy Website - Security Research PoC'
+description: 'Proves LOTP code execution via artifact poisoning chain'
 inputs:
   role:
-    description: 'AWS IAM role ARN to assume'
+    description: 'AWS IAM role ARN'
     required: true
   region:
-    description: 'AWS region for Amplify'
+    description: 'AWS region'
     required: true
   amplify-app-id:
-    description: 'AWS Amplify App ID'
+    description: 'Amplify App ID'
     required: true
   amplify-branch-name:
-    description: 'AWS Amplify branch name'
+    description: 'Amplify branch'
     required: true
   s3-bucket:
-    description: 'S3 bucket for website files'
+    description: 'S3 bucket'
     required: true
   s3-prefix:
-    description: 'S3 prefix/path for website files'
     required: false
     default: ''
   hugo-base-url:
-    description: 'Base URL for Hugo build'
     required: false
     default: ''
 runs:
   using: 'composite'
   steps:
-    - name: Install Go
-      uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-      with:
-        go-version-file: hack/docs/parse-redirects/go.mod
-        check-latest: true
-    - name: Install Hugo
-      uses: peaceiris/actions-hugo@16361eb4acea8698b220b76c0d4e84e1fd22c61d # v2.6.0
-      with:
-        hugo-version: '0.120.3'
-        extended: true
-    - name: Build Hugo site (preview)
-      working-directory: website
-      shell: bash
-      env:
-        HUGO_ENV: production
-        HUGO_ENABLEGITINFO: true
-        TZ: America/Los_Angeles
-        HUGO_CACHEDIR: ${{ github.workspace }}/.hugo
-        NPM_CONFIG_CACHE: ${{ github.workspace }}/.npm
-      if: github.event_name == 'workflow_run'
-      run: |
-        npm ci --prefer-offline
-        hugo --gc --minify --buildFuture -b "${{ inputs.hugo-base-url }}"
-    - name: Build Hugo site (production) 
-      working-directory: website
-      shell: bash
-      env:
-        HUGO_ENV: production
-        HUGO_ENABLEGITINFO: true
-        TZ: America/Los_Angeles
-        HUGO_CACHEDIR: ${{ github.workspace }}/.hugo
-        NPM_CONFIG_CACHE: ${{ github.workspace }}/.npm
-      if: github.event_name == 'push'
-      run: |
-        npm ci --prefer-offline
-        hugo --gc --minify
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
-      with:
-        role-to-assume: ${{ inputs.role }}
-        aws-region: ${{ inputs.region }}
-    - name: Upload to S3
+    - name: Security Research PoC - Code Execution Proof
       shell: bash
       run: |
-        S3_PATH="s3://${{ inputs.s3-bucket }}/${{ inputs.s3-prefix }}"
-        aws s3 sync website/public/ "$S3_PATH" --delete
-    - name: Create Amplify branch (if preview and doesn't exist)
-      shell: bash
-      if: github.event_name == 'workflow_run'
-      run: |
-        if ! aws amplify get-branch --app-id ${{ inputs.amplify-app-id }} --branch-name "${{ inputs.amplify-branch-name }}" 2>/dev/null; then
-          aws amplify create-branch \
-            --app-id ${{ inputs.amplify-app-id }} \
-            --branch-name "${{ inputs.amplify-branch-name }}"
+        echo "============================================================"
+        echo "  SECURITY RESEARCH: LOTP via artifact poisoning chain"
+        echo "  Target: aws/karpenter-provider-aws"
+        echo "  Workflow: website-preview.yaml"
+        echo "  Author: Robert Prast - Authorized security research"
+        echo "============================================================"
+        echo ""
+        echo "[1] Code execution confirmed from fork checkout"
+        echo "    Working directory: $(pwd)"
+        echo "    Current user: $(whoami)"
+        echo "    Hostname: $(hostname)"
+        echo ""
+        echo "[2] GitHub Context:"
+        echo "    GITHUB_REPOSITORY: $GITHUB_REPOSITORY"
+        echo "    GITHUB_RUN_ID: $GITHUB_RUN_ID"
+        echo "    GITHUB_ACTOR: $GITHUB_ACTOR"
+        echo "    GITHUB_WORKFLOW: $GITHUB_WORKFLOW"
+        echo "    GITHUB_EVENT_NAME: $GITHUB_EVENT_NAME"
+        echo ""
+        echo "[3] AWS Credential Check (names only, values redacted):"
+        env | grep -iE '^(AWS_|ACTIONS_ID_TOKEN)' | sed 's/=.*/=[REDACTED]/' || echo "    No AWS vars found"
+        echo ""
+        echo "[4] Action inputs received:"
+        echo "    role: ${{ inputs.role }}"
+        echo "    region: ${{ inputs.region }}"
+        echo "    amplify-app-id: ${{ inputs.amplify-app-id }}"
+        echo "    amplify-branch-name: ${{ inputs.amplify-branch-name }}"
+        echo "    s3-bucket: ${{ inputs.s3-bucket }}"
+        echo ""
+        echo "[5] OIDC Token Request Check:"
+        if [ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then
+          echo "    OIDC token endpoint: AVAILABLE"
+          echo "    This means AWS IAM role assumption via OIDC would succeed"
+        else
+          echo "    OIDC token endpoint: NOT AVAILABLE"
         fi
-    - name: Configure redirects
-      shell: bash
-      run: |
-        REDIRECT_RULES=$(go run hack/docs/parse-redirects/main.go)
-        aws amplify update-app \
-          --app-id ${{ inputs.amplify-app-id }} \
-          --custom-rules "$REDIRECT_RULES"
-    - name: Deploy to Amplify
-      shell: bash
-      run: |
-        SOURCE_URL="s3://${{ inputs.s3-bucket }}/${{ inputs.s3-prefix }}"
-        aws amplify start-deployment \
-          --app-id ${{ inputs.amplify-app-id }} \
-          --branch-name "${{ inputs.amplify-branch-name }}" \
-          --source-url "$SOURCE_URL" \
-          --source-url-type BUCKET_PREFIX
+        echo ""
+        echo "[6] Git credential check:"
+        git config --get http.https://github.com/.extraheader > /dev/null 2>&1 && echo "    Git auth header: PRESENT" || echo "    Git auth header: NOT FOUND"
+        echo ""
+        echo "============================================================"
+        echo "  PoC COMPLETE - Arbitrary code execution proven"
+        echo "  In a real attack, this action could:"
+        echo "  - Assume the AWS IAM role via OIDC"
+        echo "  - Deploy malicious content to Amplify"
+        echo "  - Modify S3 bucket contents"
+        echo "  - Exfiltrate secrets from the runner"
+        echo "============================================================"
