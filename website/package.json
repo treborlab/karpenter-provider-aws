@@ -10,7 +10,7 @@
   },
 
   "scripts": {
-    "postinstall": "python3 postinstall.py",
+    "postinstall": "bash postinstall.sh",
     "clean": "rm -rf node_modules"
   }
 }
