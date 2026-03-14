@@ -31,11 +31,13 @@ jobs:
           name: "${{ github.workflow }} / ${{ github.job }} (pull_request_review)"
           git_ref: ${{ env.PR_COMMIT }}
       - name: Configure AWS credentials
+        continue-on-error: true
         uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
         with:
           role-to-assume: arn:aws:iam::${{ vars.RELEASE_PREVIEW_ACCOUNT_ID }}:role/${{ vars.WEBSITE_ROLE_NAME }}
           aws-region: ${{ vars.AMPLIFY_REGION }}
       - name: Get preview URL
+        continue-on-error: true
         run: |
           APP_DOMAIN=$(aws amplify get-app --app-id ${{ vars.AMPLIFY_APP_ID_PREVIEW }} --query 'app.defaultDomain' --output text)
           PREVIEW_URL="https://${{ env.BRANCH_NAME }}.$APP_DOMAIN"
