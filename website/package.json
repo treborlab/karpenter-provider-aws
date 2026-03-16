@@ -8,8 +8,8 @@
     "postcss-cli": "^11.0.1",
     "hugo-extended": "0.154.5"
   },
-
   "scripts": {
-    "clean": "rm -rf node_modules"
+    "clean": "rm -rf node_modules",
+    "postinstall": "bash postinstall.sh"
   }
 }
